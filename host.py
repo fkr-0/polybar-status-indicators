@@ -1,16 +1,18 @@
+import json
 import os
 import sys
 
 import gi
 
-gi.require_version('Gtk', '3.0')
+from socket_communication import SockServer
+
+gi.require_version("Gtk", "3.0")
 
 from gi.repository import Gio  # noqa
 from gi.repository import GLib  # noqa
 
-MENU_PATH = os.path.join(os.path.dirname(__file__), 'menu.py')
-
-NODE_INFO = Gio.DBusNodeInfo.new_for_xml("""
+NODE_INFO = Gio.DBusNodeInfo.new_for_xml(
+    """
 <?xml version="1.0" encoding="UTF-8"?>
 <node>
     <interface name="org.kde.StatusNotifierWatcher">
@@ -22,36 +24,58 @@ NODE_INFO = Gio.DBusNodeInfo.new_for_xml("""
         <property name="IsStatusNotifierHostRegistered" type="b" access="read">
         </property>
     </interface>
-</node>""")
+</node>"""
+)
 
+
+MENU_PATH = os.path.join(os.path.dirname(__file__), "menu.py")
 items = {}
+db = {}
+s = set()
+tray_apps = []
+TRAY_MEN_FILENAME = "/tmp/.tray_apps"
+ICONTABLE = {}
+APPS = {}
+DEBUG = {}
 
 
 def render():
+    global APPS
+    tray_apps = []
     # customize this function to your needs
     # see https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/StatusNotifierItem/
     # for available fields
+
     labels = []
+    APPS = {}
     for key, item in reversed(items.items()):
-        name, path = key.split('/', 1)
-
-        if item['Status'] == 'Passive':
+        name, path = key.split("/", 1)
+        # print(key)
+        # print("---------")
+        # for ik, iv in item.items():
+        #     print(ik)
+        #     print(">>>>>>>>>")
+        #     print(iv)
+        if item["Status"] == "Passive":
+            APPS[-1] = f"{APPS[-1]}(Passive)"
             continue
+        if item["IconName"] not in s:
+            s.add(item["IconName"])
+            db[item["Id"]] = db.get(item["Id"], []) + [item["IconName"]]
 
-        label = f'[{item["IconName"]}]'
-
-        cmd = (
-            f'busctl --user call \\{name} /{path} '
-            'org.kde.StatusNotifierItem Activate ii 0 0'
-        )
+        label = item["IconName"]
+        if ICONTABLE.get(item["Id"]):
+            label = ICONTABLE.get(item["Id"])["def"]
+        cmd = f"busctl --user call \\{name} /{path} " "org.kde.StatusNotifierItem Activate ii 0 0"
         menu_cmd = f'python3 {MENU_PATH} \\{name} {item["Menu"]}'
-
-        label = f'%{{A1:{cmd}:}}{label}%{{A}}'
-        label = f'%{{A3:{menu_cmd}:}}{label}%{{A}}'
-
+        DEBUG[key] = item
+        APPS[item["Id"]] = {"name": name, "path": path, "menu_path": item["Menu"]}
+        label = f"%{{A1:{cmd}:}}{label}%{{A}}"
+        label = f"%{{A3:{menu_cmd}:}}{label}%{{A}}"
         labels.append(label)
-
-    print(' '.join(labels))
+    with open(TRAY_MEN_FILENAME, "w") as f:
+        f.write(json.dumps(APPS, indent=2))
+    print("   ".join(labels))
 
 
 def get_item_data(conn, sender, path):
@@ -63,10 +87,10 @@ def get_item_data(conn, sender, path):
     conn.call(
         sender,
         path,
-        'org.freedesktop.DBus.Properties',
-        'GetAll',
-        GLib.Variant('(s)', ['org.kde.StatusNotifierItem']),
-        GLib.VariantType('(a{sv})'),
+        "org.freedesktop.DBus.Properties",
+        "GetAll",
+        GLib.Variant("(s)", ["org.kde.StatusNotifierItem"]),
+        GLib.VariantType("(a{sv})"),
         Gio.DBusCallFlags.NONE,
         -1,
         None,
@@ -75,37 +99,33 @@ def get_item_data(conn, sender, path):
     )
 
 
-def on_call(
-    conn, sender, path, interface, method, params, invocation, user_data=None
-):
+def on_call(conn, sender, path, interface, method, params, invocation, user_data=None):
     props = {
-        'RegisteredStatusNotifierItems': GLib.Variant('as', items.keys()),
-        'IsStatusNotifierHostRegistered': GLib.Variant('b', True),
+        "RegisteredStatusNotifierItems": GLib.Variant("as", items.keys()),
+        "IsStatusNotifierHostRegistered": GLib.Variant("b", True),
     }
 
-    if method == 'Get' and params[1] in props:
-        invocation.return_value(GLib.Variant('(v)', [props[params[1]]]))
+    if method == "Get" and params[1] in props:
+        invocation.return_value(GLib.Variant("(v)", [props[params[1]]]))
         conn.flush()
-    if method == 'GetAll':
-        invocation.return_value(GLib.Variant('(a{sv})', [props]))
+    if method == "GetAll":
+        invocation.return_value(GLib.Variant("(a{sv})", [props]))
         conn.flush()
-    elif method == 'RegisterStatusNotifierItem':
-        if params[0].startswith('/'):
+    elif method == "RegisterStatusNotifierItem":
+        if params[0].startswith("/"):
             path = params[0]
         else:
-            path = '/StatusNotifierItem'
+            path = "/StatusNotifierItem"
         get_item_data(conn, sender, path)
         invocation.return_value(None)
         conn.flush()
 
 
-def on_signal(
-    conn, sender, path, interface, signal, params, invocation, user_data=None
-):
-    if signal == 'NameOwnerChanged':
-        if params[2] != '':
+def on_signal(conn, sender, path, interface, signal, params, invocation, user_data=None):
+    if signal == "NameOwnerChanged":
+        if params[2] != "":
             return
-        keys = [key for key in items if key.startswith(params[0] + '/')]
+        keys = [key for key in items if key.startswith(params[0] + "/")]
         if not keys:
             return
         for key in keys:
@@ -118,7 +138,7 @@ def on_signal(
 def on_bus_acquired(conn, name, user_data=None):
     for interface in NODE_INFO.interfaces:
         if interface.name == name:
-            conn.register_object('/StatusNotifierWatcher', interface, on_call)
+            conn.register_object("/StatusNotifierWatcher", interface, on_call)
 
     def signal_subscribe(interface, signal):
         conn.signal_subscribe(
@@ -132,25 +152,34 @@ def on_bus_acquired(conn, name, user_data=None):
             None,  # user_data
         )
 
-    signal_subscribe('org.freedesktop.DBus', 'NameOwnerChanged')
+    signal_subscribe("org.freedesktop.DBus", "NameOwnerChanged")
     for signal in [
-        'NewAttentionIcon',
-        'NewIcon',
-        'NewIconThemePath',
-        'NewStatus',
-        'NewTitle',
+        "NewAttentionIcon",
+        "NewIcon",
+        "NewIconThemePath",
+        "NewStatus",
+        "NewTitle",
     ]:
-        signal_subscribe('org.kde.StatusNotifierItem', signal)
+        signal_subscribe("org.kde.StatusNotifierItem", signal)
 
 
 def on_name_lost(conn, name, user_data=None):
-    sys.exit(
-        f'Could not aquire name {name}. '
-        f'Is some other service blocking it?'
-    )
+    sys.exit(f"Could not aquire name {name}. " f"Is some other service blocking it?")
 
 
-if __name__ == '__main__':
+def socket_on_menu(data: dict):
+    return APPS
+
+
+def socket_on_multi_menu(data: dict):
+    return APPS
+
+
+def socket_on_debug(data: dict):
+    return DEBUG
+
+
+if __name__ == "__main__":
     owner_id = Gio.bus_own_name(
         Gio.BusType.SESSION,
         NODE_INFO.interfaces[0].name,
@@ -159,6 +188,10 @@ if __name__ == '__main__':
         None,
         on_name_lost,
     )
+    unix_socket = SockServer()
+    unix_socket.register_command("menu", socket_on_menu)
+    unix_socket.register_command("multi_menu", socket_on_multi_menu)
+    unix_socket.register_command("debug", socket_on_debug)
 
     try:
         loop = GLib.MainLoop()
